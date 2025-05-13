@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Global Meeting Scheduler</title>
+
+  <!-- Tailwind (load before config) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: { extend: {} },
+    };
+  </script>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+  <style>
+    #search-wrapper { position: relative; }
+    #suggestions   { z-index: 20; }
+  </style>
+</head>
+<body class="bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 flex flex-col min-h-screen">
+
+  <!-- Header -->
+  <header class="p-4 shadow-md flex justify-between items-center bg-gray-100 dark:bg-gray-800">
+    <h1 class="text-2xl font-bold">Global Meeting Scheduler</h1>
+    <button id="dark-toggle"
+      class="px-3 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition">
+      Toggle Dark
+    </button>
+  </header>
+
+  <!-- Explanation + CTA -->
+  <div class="container mx-auto mt-4 p-4 bg-blue-100 dark:bg-blue-900 text-blue-900 dark:text-blue-200 rounded-md shadow-sm max-w-4xl">
+    <p class="text-lg">
+      Instantly find overlapping time slots anywhere in the world—whether you’re coordinating work meetings, planning a game night with friends across time zones, or arranging a long-distance date with your partner.
+    </p>
+    <button id="cta-add-location"
+      class="mt-3 px-5 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition">
+      Start Now
+    </button>
+  </div>
+
+  <main class="flex-grow container mx-auto p-4 space-y-6">
+
+    <!-- Search + Controls -->
+    <section class="space-y-4">
+      <div id="search-wrapper">
+        <input id="search" type="text" placeholder="Search city or timezone…"
+          class="w-full p-2 border rounded bg-white dark:bg-gray-800 dark:border-gray-700
+                 focus:outline-none focus:ring-2 focus:ring-blue-400"/>
+        <ul id="suggestions"
+            class="absolute w-full mt-1 max-h-40 overflow-auto border rounded
+                   bg-white dark:bg-gray-800 dark:border-gray-700"></ul>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button id="daily-view"
+          class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition">
+          Daily View
+        </button>
+        <button id="weekly-view"
+          class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition">
+          Weekly View
+        </button>
+        <button id="export-ical"
+          class="px-4 py-2 bg-green-500 text-white rounded opacity-50 pointer-events-none"
+          disabled>Export iCal</button>
+        <button id="share-url"
+          class="px-4 py-2 bg-indigo-500 text-white rounded opacity-50 pointer-events-none"
+          disabled>Share URL</button>
+      </div>
+    </section>
+
+    <!-- Map -->
+    <section>
+      <div id="map" class="h-64 md:h-80 lg:h-96 rounded shadow-sm"></div>
+    </section>
+
+    <!-- Selected Locations -->
+    <section>
+      <h2 class="text-xl font-semibold mb-2">Selected Locations</h2>
+      <div id="cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    </section>
+
+    <!-- Overlap -->
+    <section>
+      <h2 class="text-xl font-semibold mb-2">Available Overlap</h2>
+      <div id="overlap" class="p-4 bg-gray-50 dark:bg-gray-800 rounded shadow-sm">
+        Add at least 2 locations to see overlap.
+      </div>
+    </section>
+
+    <!-- Email Capture -->
+    <section class="bg-gray-100 dark:bg-gray-800 p-4 rounded shadow-sm max-w-md">
+      <h3 class="font-medium mb-2">Join our mailing list</h3>
+      <form id="email-form" class="flex space-x-2">
+        <input type="email" id="email" required placeholder="Your email"
+          class="flex-grow p-2 border rounded bg-white dark:bg-gray-700 dark:border-gray-600
+                 focus:outline-none focus:ring-2 focus:ring-purple-400"/>
+        <button type="submit"
+          class="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 transition">
+          Subscribe
+        </button>
+      </form>
+    </section>
+
+  </main>
+
+  <footer class="p-4 text-center text-sm bg-gray-100 dark:bg-gray-800">
+    &copy; 2025 Global Meeting Scheduler
+  </footer>
+
+  <!-- Leaflet & Luxon -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/luxon@3/build/global/luxon.min.js"></script>
+  <script>
+  (function(){
+    const { DateTime, Interval } = luxon;
+
+    // Dark-mode persistence
+    if (localStorage.getItem('dark') === 'true') {
+      document.documentElement.classList.add('dark');
+    }
+
+    // DOM refs
+    const searchEl   = document.getElementById('search');
+    const suggEl     = document.getElementById('suggestions');
+    const cardsEl    = document.getElementById('cards');
+    const overlapEl  = document.getElementById('overlap');
+    const dailyBtn   = document.getElementById('daily-view');
+    const weeklyBtn  = document.getElementById('weekly-view');
+    const exportBtn  = document.getElementById('export-ical');
+    const shareBtn   = document.getElementById('share-url');
+    const emailForm  = document.getElementById('email-form');
+    const darkBtn    = document.getElementById('dark-toggle');
+    const ctaBtn     = document.getElementById('cta-add-location');
+
+    let locations   = [];
+    let markers     = [];
+    let currentView = 'daily';
+
+    // Helpers
+    function debounce(fn, ms=300){ let t; return (...a)=>{ clearTimeout(t); t = setTimeout(()=>fn(...a), ms); }; }
+    function fetchJSON(u){ return fetch(u).then(r=>{ if(!r.ok) throw 'fetch error'; return r.json(); }); }
+    function setButtons(on){
+      [exportBtn, shareBtn].forEach(b=>{
+        b.disabled = !on;
+        b.classList.toggle('opacity-50', !on);
+        b.classList.toggle('pointer-events-none', !on);
+      });
+    }
+
+    // Initialize map
+    const map = L.map('map').setView([20,0],2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      attribution:'© OpenStreetMap'
+    }).addTo(map);
+    window.addEventListener('load', ()=> map.invalidateSize());
+
+    // CTA focuses search input
+    ctaBtn.onclick = ()=> searchEl.focus();
+
+    // Autocomplete search
+    searchEl.addEventListener('input', debounce(e=>{
+      const q = e.target.value.trim();
+      if(!q) return suggEl.innerHTML = '';
+      fetchJSON(`https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(q)}`)
+        .then(rs=>{
+          suggEl.innerHTML = rs.map(r=>`
+            <li class="p-2 suggestion hover:bg-gray-200 dark:hover:bg-gray-700 transition"
+                data-lat="${r.lat}" data-lon="${r.lon}" data-name="${r.display_name}">
+              ${r.display_name}
+            </li>`).join('');
+        })
+        .catch(_=> suggEl.innerHTML = '');
+    }), 300);
+
+    suggEl.onclick = e=>{
+      if(!e.target.matches('.suggestion')) return;
+      const lat = +e.target.dataset.lat,
+            lon = +e.target.dataset.lon,
+            nm  = e.target.dataset.name;
+      addLocation(nm, lat, lon);
+      suggEl.innerHTML = '';
+      searchEl.value   = '';
+    };
+
+    // Click map to add
+    map.on('click', e=>{
+      fetchJSON(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${e.latlng.lat}&lon=${e.latlng.lng}`)
+        .then(r=>{
+          const nm = r.display_name || `(${e.latlng.lat.toFixed(2)},${e.latlng.lng.toFixed(2)})`;
+          addLocation(nm, e.latlng.lat, e.latlng.lng);
+        })
+        .catch(_=>{
+          addLocation(`(${e.latlng.lat.toFixed(2)},${e.latlng.lng.toFixed(2)})`, e.latlng.lat, e.latlng.lng);
+        });
+    });
+
+    // Add location + timezone lookup
+    function addLocation(name, lat, lon){
+      fetchJSON(`https://timeapi.io/api/TimeZone/coordinate?latitude=${lat}&longitude=${lon}`)
+        .then(tzInfo=>{
+          const tz = tzInfo.ianaTimeZone
+                  || tzInfo.timeZone
+                  || tzInfo.timezone
+                  || 'UTC';
+          const m = L.marker([lat,lon]).bindPopup(name).addTo(map);
+          markers.push(m);
+          locations.push({ name, lat, lon, tz, availStart:'09:00', availEnd:'17:00' });
+          renderCards();
+          computeOverlap();
+        })
+        .catch(_=> alert('Could not determine timezone.'));
+    }
+
+    // Render cards
+    function renderCards(){
+      cardsEl.innerHTML = locations.map((loc,i)=>`
+        <div class="p-4 bg-gray-50 dark:bg-gray-800 rounded shadow-sm flex flex-col space-y-2">
+          <div>
+            <h4 class="font-semibold">${loc.name}</h4>
+            <p class="text-sm mb-2">${loc.tz}</p>
+            <label class="text-xs">
+              Available:
+              <input type="time"
+                     class="availability-start bg-white text-black border rounded p-1 text-xs mx-1"
+                     data-idx="${i}"
+                     value="${loc.availStart}" />
+              to
+              <input type="time"
+                     class="availability-end bg-white text-black border rounded p-1 text-xs mx-1"
+                     data-idx="${i}"
+                     value="${loc.availEnd}" />
+            </label>
+          </div>
+          <div class="flex justify-between items-center">
+            <p class="text-xs text-gray-600 dark:text-gray-400"></p>
+            <button data-idx-remove="${i}"
+              class="text-red-500 hover:text-red-700 transition">
+              Remove
+            </button>
+          </div>
+        </div>
+      `).join('');
+
+      // Remove handlers
+      cardsEl.querySelectorAll('[data-idx-remove]').forEach(b=>{
+        b.onclick = ()=>{
+          const i = +b.dataset.idxRemove;
+          map.removeLayer(markers[i]);
+          markers.splice(i,1);
+          locations.splice(i,1);
+          renderCards();
+          computeOverlap();
+        };
+      });
+
+      // Availability change handlers
+      cardsEl.querySelectorAll('.availability-start').forEach(inp=>{
+        inp.oninput = e=>{
+          locations[+e.target.dataset.idx].availStart = e.target.value;
+          computeOverlap();
+        };
+      });
+      cardsEl.querySelectorAll('.availability-end').forEach(inp=>{
+        inp.oninput = e=>{
+          locations[+e.target.dataset.idx].availEnd = e.target.value;
+          computeOverlap();
+        };
+      });
+    }
+
+    // Compute + display overlap
+    function computeOverlap(){
+      if (locations.length < 2){
+        overlapEl.textContent = 'Add at least 2 locations to see overlap.';
+        setButtons(false);
+        return;
+      }
+
+      const baseDay = DateTime.utc().startOf('day');
+      let html = '';
+
+      if (currentView === 'daily'){
+        // daily intersection
+        const intervals = locations.map(loc=>{
+          const [sh,sm] = loc.availStart.split(':').map(Number);
+          const [eh,em] = loc.availEnd.split(':').map(Number);
+          const s = DateTime.now().setZone(loc.tz).set({hour:sh,minute:sm}).toUTC();
+          const e = DateTime.now().setZone(loc.tz).set({hour:eh,minute:em}).toUTC();
+          return Interval.fromDateTimes(s,e);
+        });
+        const ov = intervals.reduce((a,b)=>a.intersection(b));
+        if (!ov || ov.isEmpty()){
+          overlapEl.innerHTML = '<p>No overlapping hours today.</p>';
+          setButtons(false);
+          return;
+        }
+        html += `<p class="mb-2"><strong>Global Overlap (UTC):</strong>
+                   ${ov.start.toFormat('HH:mm')} – ${ov.end.toFormat('HH:mm')}</p>
+                 <ul>`;
+        html += locations.map(loc=>{
+          return `<li class="text-sm mb-1">
+                    <strong>${loc.name}</strong> (${loc.tz}): Selected ${loc.availStart} – ${loc.availEnd}
+                  </li>`;
+        }).join('');
+        html += `</ul>`;
+      } else {
+        // weekly intersection for next 7 days
+        html += `<p class="mb-2"><strong>Weekly Overlap (UTC):</strong></p>`;
+        for (let d=0; d<7; d++){
+          const day = baseDay.plus({days:d});
+          const intervals = locations.map(loc=>{
+            const [sh,sm] = loc.availStart.split(':').map(Number);
+            const [eh,em] = loc.availEnd.split(':').map(Number);
+            const s = day.setZone(loc.tz).set({hour:sh,minute:sm}).toUTC();
+            const e = day.setZone(loc.tz).set({hour:eh,minute:em}).toUTC();
+            return Interval.fromDateTimes(s,e);
+          });
+          const ov = intervals.reduce((a,b)=>a.intersection(b));
+          html += `<p class="text-sm"><strong>${day.toFormat('ccc, LLL dd')}:</strong> ` +
+                  (ov && !ov.isEmpty()
+                    ? `${ov.start.toFormat('HH:mm')}–${ov.end.toFormat('HH:mm')} UTC`
+                    : 'No overlap'
+                  ) + `</p>`;
+        }
+        setButtons(true);
+      }
+
+      overlapEl.innerHTML = html;
+      setButtons(true);
+    }
+
+    // View toggles
+    dailyBtn.onclick  = ()=>{ currentView='daily';  computeOverlap(); };
+    weeklyBtn.onclick = ()=>{ currentView='weekly'; computeOverlap(); };
+
+    // Export iCal
+    exportBtn.onclick = ()=>{
+      // build a single-event or weekly-rrule ICS
+      const intervals = locations.map(loc=>{
+        const [sh,sm] = loc.availStart.split(':').map(Number);
+        const [eh,em] = loc.availEnd.split(':').map(Number);
+        const s = DateTime.now().setZone(loc.tz).set({hour:sh,minute:sm}).toUTC();
+        const e = DateTime.now().setZone(loc.tz).set({hour:eh,minute:em}).toUTC();
+        return Interval.fromDateTimes(s,e);
+      });
+      const ov = intervals.reduce((a,b)=>a.intersection(b));
+      if (!ov || ov.isEmpty()){
+        return alert('No overlap to export.');
+      }
+
+      const dtStart = ov.start.toUTC().toFormat("yyyyLLdd'T'HHmmss'Z'");
+      const dtEnd   = ov.end.toUTC().toFormat("yyyyLLdd'T'HHmmss'Z'");
+      const rrule   = currentView === 'weekly'
+        ? 'RRULE:FREQ=WEEKLY;COUNT=10'  // next 10 weeks
+        : '';
+
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Global Meeting Scheduler//EN',
+        'BEGIN:VEVENT',
+        `DTSTAMP:${DateTime.utc().toFormat("yyyyLLdd'T'HHmmss'Z'")}`,
+        `DTSTART:${dtStart}`,
+        `DTEND:${dtEnd}`,
+        rrule,
+        'SUMMARY:Global Meeting',
+        'END:VEVENT',
+        'END:VCALENDAR'
+      ].filter(Boolean).join('\r\n');
+
+      const blob = new Blob([ics], { type: 'text/calendar' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = 'meeting.ics';
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    // Share URL
+    shareBtn.onclick = ()=>{
+      const params = new URLSearchParams({
+        zones: locations.map(l=>l.tz).join(','),
+        view: currentView
+      });
+      prompt('Share this link:', `${location.origin}${location.pathname}?${params}`);
+    };
+
+    // Email capture
+    emailForm.onsubmit = e=>{
+      e.preventDefault();
+      alert(`Thanks for subscribing, ${e.target.email.value}!`);
+      e.target.reset();
+    };
+
+    // Dark toggle
+    darkBtn.onclick = ()=>{
+      const on = document.documentElement.classList.toggle('dark');
+      localStorage.setItem('dark', on);
+    };
+
+    // Init from share URL
+    window.addEventListener('load', ()=>{
+      const p = new URLSearchParams(location.search);
+      if (p.has('zones')) {
+        p.get('zones').split(',').forEach(tz=>{
+          fetchJSON(`https://timeapi.io/api/TimeZone/zone?timeZone=${tz}`)
+            .then(r=> addLocation(tz, r.latitude, r.longitude))
+            .catch(_=> console.warn('Zone load failed', tz));
+        });
+      }
+      if (p.get('view') === 'weekly') {
+        currentView = 'weekly';
+      }
+      computeOverlap();
+    });
+
+  })();
+  </script>
+</body>
+</html>
